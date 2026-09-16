@@ -1,0 +1,20 @@
+# Project place file
+*.rbxl
+*.rbxlx
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+sourcemap.json
+
+build/
+
+#Wally-пакеты
+Packages/
+ServerPackages/
+
+# Мусор ОС/редактора
+.DS_Store
+Thumbs.db
+*.log
