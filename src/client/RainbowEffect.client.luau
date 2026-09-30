@@ -28,6 +28,8 @@ local CONFIG = {
 	-- Насколько сдвинут оттенок у соседних частей: из-за этого лес
 	-- переливается волной, а не мигает целиком
 	spatialShift = 0.006,
+	-- За сколько секунд круг спирали доходит от края до центра
+	spiralPeriod = 2.5,
 	saturation = 0.85,
 	brightness = 1,
 }
@@ -68,18 +70,50 @@ RunService.RenderStepped:Connect(function(_deltaTime: number)
 		part.Color = Color3.fromHSV((time + phase) % 1, CONFIG.saturation, CONFIG.brightness)
 	end
 
-	-- Спирали на шляпках грибов психолеса: крутим картинку на месте.
-	-- Полный оборот примерно за 4 секунды — гипнотично, но не рябит.
-	local spin = (time * CONFIG.period / 4 * 360) % 360
+	-- Спирали на шляпках грибов психолеса: круги постоянно сжимаются к
+	-- центру, и шляпка выглядит как воронка, уходящая внутрь. Один
+	-- цикл за CONFIG.spiralPeriod секунд — медленно, без ряби.
+	local funnel = (os.clock() / CONFIG.spiralPeriod) % 1
 	for _, part in CollectionService:GetTagged("Spiral") do
 		if not part:IsA("BasePart") or not part.Parent then
 			continue
 		end
 		for _, gui in part:GetChildren() do
-			if gui:IsA("SurfaceGui") then
-				local holder = gui:FindFirstChild("Holder")
-				if holder and holder:IsA("Frame") then
-					holder.Rotation = spin
+			if not gui:IsA("SurfaceGui") then
+				continue
+			end
+			local holder = gui:FindFirstChild("Holder")
+			if not holder then
+				continue
+			end
+
+			local rings = {}
+			for _, child in holder:GetChildren() do
+				if child:IsA("Frame") and child.Name:match("^Ring") then
+					table.insert(rings, child)
+				end
+			end
+			table.sort(rings, function(a, b)
+				return a.Name < b.Name
+			end)
+
+			for index, ring in rings do
+				-- У каждого круга своя фаза: пока один исчезает в
+				-- центре, снаружи уже появляется следующий
+				local phase = ((index - 1) / #rings + funnel) % 1
+				-- Максимум меньше единицы: полотно спирали теперь
+				-- прозрачное, и круг шире шляпки торчал бы чёрной дугой
+				-- за её краем.
+				local scale = 0.9 * (1 - phase)
+				ring.Size = UDim2.fromScale(scale, scale)
+				ring.Visible = scale > 0.04
+
+				local stroke = ring:FindFirstChildWhichIsA("UIStroke")
+				if stroke then
+					-- Чёрная линия толстая: так спираль читается с
+					-- расстояния и контраст с ярким цветом резче.
+					-- Ближе к центру тоньше — это и даёт глубину.
+					stroke.Thickness = math.max(2, 16 * scale)
 				end
 			end
 		end

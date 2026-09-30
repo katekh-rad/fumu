@@ -233,6 +233,65 @@ local function roundCorners(target: GuiObject, radius: UDim)
 	corner.Parent = target
 end
 
+-- === Галочка, крестик и стрелка из полосок ===
+--
+-- Рисуем их фигурами, а не символами ✓ ✗ ← : этих символов нет в шрифте
+-- Gotham, и вместо них система подставляет пустой прямоугольник цвета
+-- текста. Именно поэтому кнопка «не беру» выглядела красным
+-- прямоугольником, а не крестиком.
+
+local function makeBar(
+	parent: GuiObject,
+	width: number,
+	thickness: number,
+	offsetX: number,
+	offsetY: number,
+	angle: number,
+	color: Color3
+): Frame
+	local bar = Instance.new("Frame")
+	bar.Name = "Bar"
+	bar.AnchorPoint = Vector2.new(0.5, 0.5)
+	bar.Position = UDim2.new(0.5, offsetX, 0.5, offsetY)
+	bar.Size = UDim2.fromOffset(math.max(1, width), math.max(1, thickness))
+	bar.Rotation = angle
+	bar.BackgroundColor3 = color
+	bar.BorderSizePixel = 0
+	bar.Parent = parent
+	roundCorners(bar, UDim.new(1, 0))
+	return bar
+end
+
+local function clearShape(parent: GuiObject)
+	for _, child in parent:GetChildren() do
+		if child.Name == "Bar" then
+			child:Destroy()
+		end
+	end
+end
+
+-- Крестик: две полоски накрест
+local function drawCross(parent: GuiObject, size: number, thickness: number, color: Color3)
+	clearShape(parent)
+	makeBar(parent, size, thickness, 0, 0, 45, color)
+	makeBar(parent, size, thickness, 0, 0, -45, color)
+end
+
+-- Галочка: короткая полоска вниз-вправо и длинная вверх-вправо
+local function drawCheck(parent: GuiObject, size: number, thickness: number, color: Color3)
+	clearShape(parent)
+	makeBar(parent, size * 0.42, thickness, -size * 0.2, size * 0.1, 45, color)
+	makeBar(parent, size * 0.64, thickness, size * 0.175, size * 0.025, -45, color)
+end
+
+-- Стрелка влево: полоска и два уса на левом конце
+local function drawBackArrow(parent: GuiObject, size: number, thickness: number, color: Color3)
+	clearShape(parent)
+	makeBar(parent, size, thickness, 0, 0, 0, color)
+	makeBar(parent, size * 0.42, thickness, -size * 0.35, -size * 0.15, -45, color)
+	makeBar(parent, size * 0.42, thickness, -size * 0.35, size * 0.15, 45, color)
+end
+
 -- Пиктограмма лупы: круглое стекло в цветной оправе + ручка.
 -- Уровень лупы виден по цвету оправы и по точкам (1-3) внизу слева.
 local function makeMagnifierIcon(level: number, size: number, showDots: boolean?): Frame
@@ -409,11 +468,25 @@ closeButton.Size = UDim2.new(0, 32, 0, 32)
 closeButton.Position = UDim2.new(1, -46, 0, 14)
 closeButton.BackgroundColor3 = COLORS.panel
 closeButton.BorderSizePixel = 0
-closeButton.Font = Enum.Font.GothamBold
-closeButton.TextSize = 16
-closeButton.TextColor3 = COLORS.textDim
-closeButton.Text = "✕"
+closeButton.Text = ""
 closeButton.Parent = panel
+
+-- Крестик рисуем двумя полосками, а не символом шрифта: символ ✕ есть
+-- не во всех шрифтах и на части устройств выглядел пустым прямоугольником.
+for _, angle in { 45, -45 } do
+	local bar = Instance.new("Frame")
+	bar.AnchorPoint = Vector2.new(0.5, 0.5)
+	bar.Position = UDim2.fromScale(0.5, 0.5)
+	bar.Size = UDim2.new(0, 16, 0, 2)
+	bar.Rotation = angle
+	bar.BackgroundColor3 = COLORS.text
+	bar.BorderSizePixel = 0
+	bar.Parent = closeButton
+
+	local barCorner = Instance.new("UICorner")
+	barCorner.CornerRadius = UDim.new(1, 0)
+	barCorner.Parent = bar
+end
 
 local closeCorner = Instance.new("UICorner")
 closeCorner.CornerRadius = UDim.new(0, 8)
@@ -515,9 +588,10 @@ detailBack.BorderSizePixel = 0
 detailBack.Font = Enum.Font.GothamBold
 detailBack.TextSize = 16
 detailBack.TextColor3 = COLORS.textDim
-detailBack.Text = "←"
+detailBack.Text = ""
 detailBack.ZIndex = 11
 detailBack.Parent = detailOverlay
+drawBackArrow(detailBack, 16, 2, COLORS.text)
 
 local detailBackCorner = Instance.new("UICorner")
 detailBackCorner.CornerRadius = UDim.new(0, 8)
@@ -596,10 +670,11 @@ keepButton.BorderSizePixel = 0
 keepButton.Font = Enum.Font.GothamBold
 keepButton.TextSize = 34
 keepButton.TextColor3 = COLORS.edible
-keepButton.Text = "✓"
+keepButton.Text = ""
 keepButton.LayoutOrder = 2
 keepButton.ZIndex = 11
 keepButton.Parent = decisionRow
+drawCheck(keepButton, 38, 6, COLORS.edible)
 
 local keepCorner = Instance.new("UICorner")
 keepCorner.CornerRadius = UDim.new(0, 12)
@@ -612,10 +687,11 @@ dropButton.BorderSizePixel = 0
 dropButton.Font = Enum.Font.GothamBold
 dropButton.TextSize = 34
 dropButton.TextColor3 = COLORS.poison
-dropButton.Text = "✗"
+dropButton.Text = ""
 dropButton.LayoutOrder = 3
 dropButton.ZIndex = 11
 dropButton.Parent = decisionRow
+drawCross(dropButton, 32, 6, COLORS.poison)
 
 local dropCorner = Instance.new("UICorner")
 dropCorner.CornerRadius = UDim.new(0, 12)
@@ -815,12 +891,14 @@ local function renderDetail()
 	end
 	icon.Parent = detailIconHolder
 
+	-- Выбранный гриб: кнопка заливается зелёным, а сама галочка
+	-- перерисовывается тёмной, иначе зелёное по зелёному не видно.
 	if slot.kept then
 		keepButton.BackgroundColor3 = COLORS.edible
-		keepButton.TextColor3 = COLORS.background
+		drawCheck(keepButton, 38, 6, COLORS.background)
 	else
 		keepButton.BackgroundColor3 = COLORS.panel
-		keepButton.TextColor3 = COLORS.edible
+		drawCheck(keepButton, 38, 6, COLORS.edible)
 	end
 
 	local displayName = if slot.discovered then slot.name else "???"
@@ -944,7 +1022,7 @@ local function makeRow(slot, index: number): TextButton
 	-- сразу видно, что гриб уже разобран и пойдёт в счёт.
 	local base = if slot.discovered then slot.name else "???"
 	if slot.kept then
-		label.Text = "✓  " .. (if slot.discovered then slot.name else "Гриб") .. " — беру"
+		label.Text = "Беру · " .. (if slot.discovered then slot.name else "Гриб")
 		label.TextColor3 = COLORS.edible
 	elseif slot.discovered then
 		-- Вид выучен: только название, без подсказки о съедобности
@@ -970,8 +1048,9 @@ local function makeRow(slot, index: number): TextButton
 	trash.Font = Enum.Font.GothamBold
 	trash.TextSize = 18
 	trash.TextColor3 = COLORS.poison
-	trash.Text = "✗"
+	trash.Text = ""
 	trash.Parent = row
+	drawCross(trash, 14, 3, COLORS.poison)
 
 	local trashCorner = Instance.new("UICorner")
 	trashCorner.CornerRadius = UDim.new(0, 6)
@@ -1355,6 +1434,13 @@ end
 
 confirmResult.OnClientEvent:Connect(function(result)
 	closeDetail()
+
+	-- Этот разбор открыл психолес: итоги не показываем, сейчас будет
+	-- переход на другую карту.
+	if result.hideResult then
+		resultOverlay.Visible = false
+		return
+	end
 
 	local delta = result.scoreDelta
 	resultDelta.Text = string.format("%+d", delta)

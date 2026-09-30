@@ -38,6 +38,10 @@ if not notify then
 	notify.Parent = ReplicatedStorage
 end
 
+-- Сколько чёрных кругов в спирали на шляпке. Кругов меньше, чем было:
+-- линии стали толще, и при семи кругах они сливались в чёрное пятно.
+local RING_COUNT = 6
+
 local PsychoMap = {}
 
 -- Кто сейчас в психолесу: игрок -> { earned, startedAt, returnCFrame }
@@ -141,9 +145,18 @@ local function buildBasket(position: Vector3, parent: Instance)
 	CollectionService:AddTag(basket, GameConfig.stationTag)
 end
 
--- Гриб психолеса: белая ножка и шляпка-диск, на которой крутится
--- спираль из двух цветов — чёрного и случайного яркого. Плюс свечение:
--- шляпка из Neon и точечный свет того же цвета.
+-- Гриб психолеса: белая ножка и округлая светящаяся шляпка, по которой
+-- к центру сходится спираль из чёрного и случайного яркого цвета.
+--
+-- Шляпка собрана из двух частей. Снизу приплюснутый шар — он даёт
+-- округлый силуэт, чтобы гриб не выглядел плиткой на палке. Сверху
+-- тонкий диск: на его круглой грани и живёт спираль.
+--
+-- Важная тонкость: полотно SurfaceGui всегда прямоугольное, по размеру
+-- габаритной коробки грани. Раньше это полотно было залито цветом
+-- шляпки целиком — и круглая шляпка выглядела квадратной, а спираль
+-- казалась наклейкой поверх неё. Теперь полотно прозрачное: сквозь него
+-- виден сам Neon-цилиндр, и чёрные круги ложатся прямо на шляпку.
 --
 -- Саму спираль крутит клиент (RainbowEffect) по тегу "Spiral": вращение
 -- картинки незачем гонять по сети.
@@ -155,21 +168,48 @@ local function buildMushroom(position: Vector3, parent: Instance): (Model, Color
 	-- контраст с чёрным был резким
 	local capColor = Color3.fromHSV(math.random(), 1, 1)
 
+	-- Ножка: высокая и тонкая. Была 1.4 в высоту при диаметре 0.5, и из
+	-- неё торчал из-под шляпки только обрубок — он и читался кругляшом,
+	-- а не ножкой. Теперь 2.2 при диаметре 0.42: из-под купола видно
+	-- 1.57 studs, то есть почти в четыре раза больше толщины.
 	local stem = makePart(
 		"Stem",
-		Vector3.new(1.6, 0.5, 0.5),
-		CFrame.new(position + Vector3.new(0, 0.8, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+		Vector3.new(2.2, 0.42, 0.42),
+		CFrame.new(position + Vector3.new(0, 1.1, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color3.fromRGB(250, 250, 240),
 		model
 	)
 	stem.Shape = Enum.PartType.Cylinder
 	stem.Material = Enum.Material.Neon
 
-	-- Шляпка — плоский диск: на его верхнюю грань ложится спираль
+	-- Низ шляпки: приплюснутый шар. Он виден сбоку и снизу и делает
+	-- шляпку округлой. Поднят вместе с ножкой.
+	local dome = makePart(
+		"CapDome",
+		Vector3.new(2.9, 1.45, 2.9),
+		CFrame.new(position + Vector3.new(0, 2.3, 0)),
+		capColor,
+		model
+	)
+	dome.Shape = Enum.PartType.Ball
+	dome.Material = Enum.Material.Neon
+	-- Купол не участвует в трассировке луча. Иначе он закрывает собой
+	-- точку, в которой висит подсказка "Собрать" (см. ниже).
+	dome.CanQuery = false
+
+	-- Верх шляпки: диск со спиралью, шириной 2.1 против 2.9 у купола.
+	-- Размеры подобраны так, чтобы нижняя грань диска легла ровно по
+	-- изгибу купола (на высоте 2.80), а верхняя поднялась на 0.075 выше
+	-- макушки (3.025). Тогда сбоку не видно ни полки, ни щели: силуэт
+	-- задаёт округлый купол, спираль лежит в его центре, а вокруг неё
+	-- остаётся узкий яркий кант шляпки.
+	--
+	-- Диск шире — спираль больше; купол площе — кант уже. Менять эти
+	-- четыре числа надо вместе, иначе диск снова станет полкой.
 	local cap = makePart(
 		"Cap",
-		Vector3.new(0.45, 2.6, 2.6),
-		CFrame.new(position + Vector3.new(0, 1.75, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+		Vector3.new(0.3, 2.1, 2.1),
+		CFrame.new(position + Vector3.new(0, 2.95, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		capColor,
 		model
 	)
@@ -183,41 +223,80 @@ local function buildMushroom(position: Vector3, parent: Instance): (Model, Color
 	light.Range = 14
 	light.Parent = cap
 
-	-- Спираль рисуем на обеих круглых гранях диска: какая из них смотрит
-	-- вверх, зависит от поворота, а лишняя просто не видна снизу.
-	for _, face in { Enum.NormalId.Right, Enum.NormalId.Left } do
-		local gui = Instance.new("SurfaceGui")
-		gui.Face = face
-		gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-		gui.PixelsPerStud = 80
-		gui.LightInfluence = 0
-		gui.Parent = cap
+	-- Спираль только на верхней грани. Поворот диска фиксированный
+	-- (CFrame.Angles(0, 0, 90°) переводит локальную ось +X в мировую
+	-- +Y), поэтому вверх всегда смотрит грань Right. Второе полотно
+	-- снизу никто не видит — не рисуем его, экономим кадры клиента.
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Right
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	-- Полотно по диску: 2.1 studs * 140 = 294 пикселя. На шести кругах
+	-- это ~22 пикселя между ними при толщине линии до 14 — круги
+	-- остаются раздельными.
+	gui.PixelsPerStud = 140
+	gui.LightInfluence = 0
+	gui.Parent = cap
 
-		local holder = Instance.new("Frame")
-		holder.Name = "Holder"
-		holder.Size = UDim2.fromScale(1, 1)
-		holder.BackgroundColor3 = capColor
-		holder.BorderSizePixel = 0
-		holder.Parent = gui
+	local holder = Instance.new("Frame")
+	holder.Name = "Holder"
+	holder.Size = UDim2.fromScale(1, 1)
+	-- Прозрачно: сквозь полотно видно саму шляпку. Залей его цветом — и
+	-- круглая шляпка снова станет квадратом.
+	holder.BackgroundTransparency = 1
+	holder.BorderSizePixel = 0
+	holder.Parent = gui
 
-		-- Восемь лучей вразбег: вместе с вращением читаются как спираль
-		for index = 1, 8 do
-			local blade = Instance.new("Frame")
-			blade.AnchorPoint = Vector2.new(0.5, 0.5)
-			blade.Position = UDim2.fromScale(0.5, 0.5)
-			blade.Size = UDim2.fromScale(0.17, 1.5)
-			blade.Rotation = (index - 1) * 22.5
-			blade.BackgroundColor3 = Color3.new(0, 0, 0)
-			blade.BorderSizePixel = 0
-			blade.Parent = holder
-		end
+	-- Спираль собрана из вложенных чёрных кругов. Клиент постоянно
+	-- сжимает их к центру, и получается воронка, уходящая внутрь
+	-- шляпки — как на гипнотических спиралях.
+	for index = 1, RING_COUNT do
+		local ring = Instance.new("Frame")
+		ring.Name = "Ring" .. index
+		ring.AnchorPoint = Vector2.new(0.5, 0.5)
+		ring.Position = UDim2.fromScale(0.5, 0.5)
+		ring.Size = UDim2.fromScale(0.1 * index, 0.1 * index)
+		ring.BackgroundTransparency = 1
+		ring.BorderSizePixel = 0
+		ring.Parent = holder
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = ring
+
+		-- Толщину каждый кадр пересчитывает клиент; здесь только
+		-- начальное значение, чтобы круг не мигнул тонким в первый кадр.
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 12
+		stroke.Color = Color3.new(0, 0, 0)
+		stroke.Parent = ring
 	end
+
+	-- Чёрная точка в центре: к ней и сходится воронка
+	local core = Instance.new("Frame")
+	core.Name = "Core"
+	core.AnchorPoint = Vector2.new(0.5, 0.5)
+	core.Position = UDim2.fromScale(0.5, 0.5)
+	core.Size = UDim2.fromScale(0.13, 0.13)
+	core.BackgroundColor3 = Color3.new(0, 0, 0)
+	core.BorderSizePixel = 0
+	core.Parent = holder
+
+	local coreCorner = Instance.new("UICorner")
+	coreCorner.CornerRadius = UDim.new(1, 0)
+	coreCorner.Parent = core
 
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.ActionText = "Собрать"
 	prompt.ObjectText = "Гриб"
 	prompt.HoldDuration = 0.3
 	prompt.MaxActivationDistance = GameConfig.pickupRadius
+	-- Вот из-за этой строки на психо-карте не работала клавиша E.
+	-- По умолчанию подсказка требует прямой видимости и стреляет лучом
+	-- от камеры в свою точку. Точка эта — центр диска, а он утоплен
+	-- внутрь купола: луч бился в купол, подсказка считала себя
+	-- закрытой и не показывалась. На обычной карте шляпка одна деталь,
+	-- перекрывать её нечем, поэтому там всё работало.
+	prompt.RequiresLineOfSight = false
 	prompt.Parent = cap
 
 	model.PrimaryPart = stem
@@ -378,7 +457,16 @@ function PsychoMap.Exit(player: Player, reason: string?)
 	visits[player] = nil
 
 	psychoTransition:FireClient(player, "exit")
-	teleport(player, visit.returnCFrame)
+
+	-- Возвращаем на площадку появления у большой корзины, а не в точку,
+	-- откуда забрали: там игрок стоял вплотную к корзине и попадал
+	-- внутрь неё.
+	local spawn = workspace:FindFirstChild("BasketSpawn")
+	local destination = visit.returnCFrame
+	if spawn and spawn:IsA("BasePart") then
+		destination = CFrame.new(spawn.Position + Vector3.new(0, 4, 0))
+	end
+	teleport(player, destination)
 
 	notify:FireClient(
 		player,

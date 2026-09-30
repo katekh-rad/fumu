@@ -280,17 +280,16 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 	-- После первого удачного разбора рассказываем про магазин
 	PlayerData.TryHint(player, "shop", "У большой корзины есть магазин: там продаётся лупа.", 3)
 
-	-- Психолес: считаем заработанное за визит, а разобранный радужный
-	-- гриб открывает вход. Порядок важен: сначала засчитать очки
-	-- текущего визита, потом уже начинать новый.
+	-- Психолес: считаем заработанное за визит. Сам вход — ниже, уже
+	-- после отправки итогов, иначе окно итогов всплывёт на новой карте.
 	PsychoMap.AddEarned(player, scoreAfter - scoreBefore)
-	if rainbowFound then
-		PsychoMap.Enter(player)
-	end
 
 	confirmResult:FireClient(player, {
 		-- ×2 в психолесу: клиент покажет это в итогах
 		multiplier = multiplier,
+		-- Разбор, открывший психолес: итоги не показываем совсем,
+		-- игрока сейчас перенесёт на другую карту
+		hideResult = rainbowFound,
 		correct = correct,
 		wrong = wrong,
 		spoiled = spoiled,
@@ -301,6 +300,12 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 	})
 
 	pushUpdate(player)
+
+	-- Радужный гриб открывает психолес. Делаем это последним, когда
+	-- клиент уже получил и состояние корзины, и итоги.
+	if rainbowFound then
+		PsychoMap.Enter(player)
+	end
 end)
 
 -- Обновляем UI ровно тогда, когда состояние игрока реально изменилось
