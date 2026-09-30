@@ -20,6 +20,7 @@ export type MushroomTypeId =
 	| "FALSE_HONEY_FUNGUS"
 	| "MILK_CAP"
 	| "EARTHBALL"
+	| "RAINBOW_CAP"
 
 export type MushroomTypeData = {
 	id: MushroomTypeId,
@@ -118,6 +119,18 @@ local MushroomTypes: { [MushroomTypeId]: MushroomTypeData } = {
 		rarity = 9,
 		visualDifficulty = 2,
 		modelColor = Color3.fromRGB(220, 190, 200),
+	},
+	-- Радужный гриб: не выпадает по весам (rarity = 0), его подставляет
+	-- спавнер с шансом GameConfig.psycho.rainbowChance. Съедобен, а при
+	-- подтверждении открывает психоделический лес.
+	RAINBOW_CAP = {
+		id = "RAINBOW_CAP",
+		name = "Радужный гриб",
+		isEdible = true,
+		basePoints = 25,
+		rarity = 0,
+		visualDifficulty = 1,
+		modelColor = Color3.fromRGB(255, 120, 220),
 	},
 	EARTHBALL = {
 		id = "EARTHBALL",

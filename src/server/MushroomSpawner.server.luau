@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local MushroomTypes = require(ReplicatedStorage.Shared.MushroomTypes)
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local Zones = require(ReplicatedStorage.Shared.Zones)
 -- script.Parent, а не ServerScriptService напрямую: Rojo кладёт скрипты
 -- во вложенную папку (ServerScriptService.Server), поэтому PlayerData
 -- лежит рядом с этим скриптом, а не в корне сервиса.
@@ -38,21 +39,39 @@ local activeMushrooms: { [Model]: string } = {}
 
 local spawnsFolder = workspace:WaitForChild("MushroomSpawns")
 
--- Взвешенный случайный выбор вида по полю rarity
-local totalRarity = 0
 local typeList = {}
 for _, data in MushroomTypes do
 	table.insert(typeList, data)
-	totalRarity += data.rarity
 end
 
-local function pickWeightedType()
-	local roll = math.random() * totalRarity
+-- Центр зон (большая корзина) считаем один раз при старте: во время
+-- игры она не переезжает.
+local zoneCenter = Zones.GetCenter()
+
+-- Веса видов внутри одной зоны: rarity вида, умноженная на множитель
+-- зоны. Считаем по одному разу на зону, а не на каждый гриб.
+local zoneWeights: { [string]: { total: number, weights: { number } } } = {}
+for _, zoneId in Zones.Order do
+	local zone = Zones.Data[zoneId]
+	local weights = {}
+	local total = 0
+	for index, data in typeList do
+		local weight = data.rarity * (zone.rarityMultipliers[data.id] or 1)
+		weights[index] = weight
+		total += weight
+	end
+	zoneWeights[zoneId] = { total = total, weights = weights }
+end
+
+-- Взвешенный случайный выбор вида с учётом зоны
+local function pickWeightedType(zone)
+	local prepared = zoneWeights[zone.id]
+	local roll = math.random() * prepared.total
 	local cumulative = 0
-	for _, data in typeList do
-		cumulative += data.rarity
+	for index, weight in prepared.weights do
+		cumulative += weight
 		if roll <= cumulative then
-			return data
+			return typeList[index]
 		end
 	end
 	return typeList[1] -- на случай погрешности округления
@@ -215,9 +234,31 @@ local function createTrunkMushroomCluster(color: Color3, normal: Vector3): Model
 	return model
 end
 
+-- Далеко ли маркер от большой корзины (по горизонтали)
+local function distanceFromStation(position: Vector3): number
+	return (Vector3.new(position.X, 0, position.Z) - Vector3.new(zoneCenter.X, 0, zoneCenter.Z)).Magnitude
+end
+
+-- Маркеры на поляне у корзины игнорируем: там грибы не растут вообще,
+-- иначе корзину можно было бы набрать, не отходя от места разбора.
+local function isOnClearing(position: Vector3): boolean
+	return distanceFromStation(position) < Zones.clearRadius
+end
+
 local function spawnAt(marker: BasePart)
-	local typeData = pickWeightedType()
-	local color = varyColor(typeData.modelColor)
+	if isOnClearing(marker.Position) then
+		return
+	end
+
+	-- Зону берём по маркеру: она не меняется, пока маркер стоит на месте
+	local zone = Zones.GetByPosition(marker.Position, zoneCenter)
+
+	-- Раз в сотню грибов вместо обычного вырастает радужный: он всегда
+	-- съедобный, а при разборе открывает психолес (см. PsychoMap).
+	local isRainbow = math.random() < GameConfig.psycho.rainbowChance
+	local typeData = if isRainbow then MushroomTypes.RAINBOW_CAP else pickWeightedType(zone)
+	-- Радужному оттенок не разбрасываем: его цвет перебирает клиент
+	local color = if isRainbow then typeData.modelColor else varyColor(typeData.modelColor)
 	local growthType = marker:GetAttribute("GrowthType") or "Ground"
 
 	local model
@@ -234,6 +275,16 @@ local function spawnAt(marker: BasePart)
 	end
 
 	model.Parent = workspace
+
+	if isRainbow then
+		-- Тег ловит клиентский RainbowEffect и переливает шляпку
+		for _, part in model:GetDescendants() do
+			if part:IsA("BasePart") and part.Name == "Cap" then
+				part.Material = Enum.Material.Neon
+				CollectionService:AddTag(part, "Rainbow")
+			end
+		end
+	end
 
 	activeMushrooms[model] = typeData.id
 
@@ -254,13 +305,22 @@ local function spawnAt(marker: BasePart)
 				return -- гриб затоптан или пнут, собирать уже нечего
 			end
 
-			local added = PlayerData.AddMushroom(playerWhoTriggered, typeData.id, color)
+			-- Радужный гриб никогда не бывает испорченным
+			local spoilage = if isRainbow then 0 else zone.spoilageMultiplier
+			local added = PlayerData.AddMushroom(playerWhoTriggered, typeData.id, color, spoilage)
 			if added then
+				-- Первый в жизни гриб: подсказываем, что с ним делать
+				PlayerData.TryHint(
+					playerWhoTriggered,
+					"first_pickup",
+					"Разбирать грибы носи к большой корзине на поляне.",
+					1.5
+				)
 				model:Destroy() -- запустит респавн через .Destroying ниже
 			else
 				notify:FireClient(
 					playerWhoTriggered,
-					string.format("Корзина полна (%d). Разбери её у стола.", PlayerData.GetCapacity(playerWhoTriggered))
+					string.format("Корзина полна (%d). Разбери её у большой корзины.", PlayerData.GetCapacity(playerWhoTriggered))
 				)
 			end
 		end)
@@ -270,7 +330,7 @@ local function spawnAt(marker: BasePart)
 	-- респавн на этом же маркере через GameConfig.mushroomRespawnTime.
 	model.Destroying:Connect(function()
 		activeMushrooms[model] = nil
-		task.delay(GameConfig.mushroomRespawnTime, function()
+		task.delay(GameConfig.mushroomRespawnTime * zone.respawnMultiplier, function()
 			if marker.Parent then -- маркер всё ещё существует
 				spawnAt(marker)
 			end
@@ -292,4 +352,32 @@ for _, marker in spawnsFolder:GetChildren() do
 	end
 end
 
-print(string.format("Спавнер запущен: %d точек, %d видов грибов.", #spawnsFolder:GetChildren(), #typeList))
+-- Сколько маркеров попало в каждую зону — удобно проверять после
+-- перегенерации леса, не бегая по карте.
+local zoneCounts = {}
+local skipped = 0
+for _, marker in spawnsFolder:GetChildren() do
+	if marker:IsA("BasePart") then
+		if isOnClearing(marker.Position) then
+			skipped += 1
+		else
+			local zone = Zones.GetByPosition(marker.Position, zoneCenter)
+			zoneCounts[zone.name] = (zoneCounts[zone.name] or 0) + 1
+		end
+	end
+end
+
+local zoneReport = { string.format("поляна у корзины пропущена: %d", skipped) }
+for _, zoneId in Zones.Order do
+	local zone = Zones.Data[zoneId]
+	table.insert(zoneReport, string.format("%s: %d", zone.name, zoneCounts[zone.name] or 0))
+end
+
+print(
+	string.format(
+		"Спавнер запущен: %d точек (%s), %d видов грибов.",
+		#spawnsFolder:GetChildren(),
+		table.concat(zoneReport, ", "),
+		#typeList
+	)
+)

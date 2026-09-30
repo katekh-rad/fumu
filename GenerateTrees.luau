@@ -18,7 +18,16 @@
 ]]
 
 local CONFIG = {
-	treeCount = 500,
+	-- Скрипт ДОБАВЛЯЕТ деревья к тем, что уже стоят в Workspace.Trees,
+	-- и ничего не удаляет. Сейчас стоит 100 — это примерно +20% к лесу
+	-- из 500 деревьев, чтобы он стал гуще.
+	-- Чтобы построить лес с нуля: удали папку Trees в Explorer и
+	-- поставь здесь 500-600.
+	treeCount = 100,
+
+	-- Радиус вокруг большой корзины, куда деревья не ставим, чтобы
+	-- не загородить её. Корзина ищется по тегу SortingBasket.
+	stationClearRadius = 22,
 
 	-- Область, где раскидываем деревья (studs, мировые координаты).
 	-- Подставь размеры своего сгенерированного травяного поля.
@@ -111,6 +120,28 @@ if not treesFolder then
 	treesFolder.Parent = workspace
 end
 
+-- Где стоит большая корзина: рядом с ней деревья не ставим
+local CollectionService = game:GetService("CollectionService")
+local stationPosition = nil
+for _, station in CollectionService:GetTagged("SortingBasket") do
+	if station:IsA("Model") and station.Parent then
+		stationPosition = station:GetPivot().Position
+		break
+	elseif station:IsA("BasePart") and station.Parent then
+		stationPosition = station.Position
+		break
+	end
+end
+
+local function tooCloseToStation(x: number, z: number): boolean
+	if not stationPosition then
+		return false
+	end
+	local dx = x - stationPosition.X
+	local dz = z - stationPosition.Z
+	return math.sqrt(dx * dx + dz * dz) < CONFIG.stationClearRadius
+end
+
 local halfX = CONFIG.regionSizeX / 2
 local halfZ = CONFIG.regionSizeZ / 2
 local placed = 0
@@ -118,6 +149,10 @@ local placed = 0
 for i = 1, CONFIG.treeCount do
 	local x = CONFIG.regionCenter.X + (math.random() * 2 - 1) * halfX
 	local z = CONFIG.regionCenter.Z + (math.random() * 2 - 1) * halfZ
+
+	if tooCloseToStation(x, z) then
+		continue
+	end
 
 	local groundPosition = raycastGround(x, z)
 	if groundPosition then
@@ -128,5 +163,12 @@ for i = 1, CONFIG.treeCount do
 	end
 end
 
-print(string.format("Готово: расставлено %d из %d деревьев.", placed, CONFIG.treeCount))
+print(
+	string.format(
+		"Готово: добавлено %d из %d деревьев, всего в лесу %d.",
+		placed,
+		CONFIG.treeCount,
+		#treesFolder:GetChildren()
+	)
+)
 

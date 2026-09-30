@@ -15,6 +15,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local DataStoreService = game:GetService("DataStoreService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -39,6 +40,9 @@ export type PlayerState = {
 	-- Насколько игрок "выучил" каждый вид: сколько раз вид прошёл
 	-- через разбор. Название видно при >= GameConfig.namesAfterConfirms.
 	speciesKnowledge: { [string]: number },
+	-- Какие обучающие подсказки игрок уже видел (см. PlayerData.TryHint).
+	-- Сохраняются, чтобы при следующем заходе их не показывать заново.
+	seenHints: { [string]: boolean },
 }
 
 local PlayerData = {}
@@ -54,12 +58,23 @@ local dataByPlayer: { [Player]: PlayerState } = {}
 -- pcall: если API Services выключены, GetDataStore сам по себе не падает,
 -- но любые Get/Set падают. Держим store в переменной и проверяем перед
 -- использованием.
+-- Имя хранилища зависит от того, где идёт сервер. В Studio берём
+-- отдельное "_dev", чтобы тесты не перезаписывали прогресс настоящих
+-- игроков: это тот же смысл, что у отдельной тестовой копии игры, но
+-- без второй карты. Обратная сторона — из Studio не видно живых данных.
+local STORE_NAME = if RunService:IsStudio()
+	then "MushroomGamePlayerData_dev"
+	else "MushroomGamePlayerData_v1"
+
 local store
 do
 	local ok, result = pcall(function()
-		return DataStoreService:GetDataStore("MushroomGamePlayerData_v1")
+		return DataStoreService:GetDataStore(STORE_NAME)
 	end)
 	store = if ok then result else nil
+	if store then
+		print(string.format("PlayerData: хранилище %s", STORE_NAME))
+	end
 end
 
 local function makeDefaultState(): PlayerState
@@ -71,6 +86,7 @@ local function makeDefaultState(): PlayerState
 		discoveredTypes = {},
 		mushroomsSorted = 0,
 		speciesKnowledge = {},
+		seenHints = {},
 	}
 end
 
@@ -158,6 +174,9 @@ local function loadFromStore(player: Player): PlayerState
 		state.ownedTools = migrateTools(saved.ownedTools)
 	end
 	state.mushroomsSorted = tonumber(saved.mushroomsSorted) or 0
+	if type(saved.seenHints) == "table" then
+		state.seenHints = saved.seenHints
+	end
 	if type(saved.speciesKnowledge) == "table" then
 		for typeId, value in saved.speciesKnowledge do
 			if type(typeId) == "string" and type(value) == "number" then
@@ -188,6 +207,7 @@ local function saveToStore(player: Player)
 			discoveredTypes = data.discoveredTypes,
 			mushroomsSorted = data.mushroomsSorted,
 			speciesKnowledge = data.speciesKnowledge,
+			seenHints = data.seenHints,
 		})
 	end)
 end
@@ -263,7 +283,12 @@ local function pickDefectSize(): number
 	return #weights
 end
 
-function PlayerData.AddMushroom(player: Player, typeId: string, color: Color3): boolean
+function PlayerData.AddMushroom(
+	player: Player,
+	typeId: string,
+	color: Color3,
+	spoilageMultiplier: number?
+): boolean
 	local data = dataByPlayer[player]
 	if not data then
 		return false
@@ -277,7 +302,8 @@ function PlayerData.AddMushroom(player: Player, typeId: string, color: Color3): 
 	-- же гриб в лесу для разных игроков может оказаться разным, и
 	-- заранее узнать это из модели в мире нельзя.
 	local defect, defectSize = nil, nil
-	if math.random() < PlayerData.GetSpoilageChance(player) then
+	-- Множитель зоны: в чаще грибы портятся чаще, на опушке реже
+	if math.random() < PlayerData.GetSpoilageChance(player) * (spoilageMultiplier or 1) then
 		defect = if math.random() < 0.5 then "mold" else "worms"
 		defectSize = pickDefectSize()
 	end
@@ -341,6 +367,90 @@ function PlayerData.DiscoverType(player: Player, typeId: string)
 	end
 	data.discoveredTypes[typeId] = true
 end
+
+-- === Обучающие подсказки ===
+
+-- Канал коротких сообщений игроку (тот же, что у спавнера)
+local notify = ReplicatedStorage:FindFirstChild("Notify")
+if not notify then
+	notify = Instance.new("RemoteEvent")
+	notify.Name = "Notify"
+	notify.Parent = ReplicatedStorage
+end
+
+-- Показывает подсказку ровно один раз за всё время игры. Возвращает
+-- true, если подсказка действительно показана — по этому можно решать,
+-- показывать ли следом вторую.
+function PlayerData.TryHint(player: Player, hintId: string, message: string, delaySeconds: number?): boolean
+	local data = dataByPlayer[player]
+	if not data or data.seenHints[hintId] then
+		return false
+	end
+
+	data.seenHints[hintId] = true
+
+	task.delay(delaySeconds or 0, function()
+		if player.Parent then
+			notify:FireClient(player, message)
+		end
+	end)
+	return true
+end
+
+-- === Автосохранение ===
+
+-- Без него прогресс пишется только при выходе игрока и при остановке
+-- сервера: если сервер упадёт, всё, что заработано за сессию, пропадёт.
+local AUTOSAVE_INTERVAL = 120
+
+-- Короткая "подпись" сохраняемых полей: если она не изменилась, писать
+-- в DataStore нечего. Так автосохранение не тратит лимиты впустую.
+local lastSignature: { [Player]: string } = {}
+
+local function makeSignature(data: PlayerState): string
+	local knowledge = {}
+	for typeId, value in data.speciesKnowledge do
+		table.insert(knowledge, typeId .. "=" .. value)
+	end
+	table.sort(knowledge)
+
+	local hints = 0
+	for _ in data.seenHints do
+		hints += 1
+	end
+
+	return table.concat({
+		data.score,
+		data.basketId,
+		#data.ownedTools,
+		data.mushroomsSorted,
+		hints,
+		table.concat(knowledge, ","),
+	}, "|")
+end
+
+task.spawn(function()
+	while true do
+		task.wait(AUTOSAVE_INTERVAL)
+
+		for _, player in Players:GetPlayers() do
+			local data = dataByPlayer[player]
+			if not data then
+				continue
+			end
+
+			local signature = makeSignature(data)
+			if lastSignature[player] ~= signature then
+				lastSignature[player] = signature
+				saveToStore(player)
+			end
+		end
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player: Player)
+	lastSignature[player] = nil
+end)
 
 Players.PlayerAdded:Connect(PlayerData.Init)
 Players.PlayerRemoving:Connect(PlayerData.Remove)

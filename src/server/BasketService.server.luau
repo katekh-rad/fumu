@@ -23,15 +23,17 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 
+local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local MushroomTypes = require(ReplicatedStorage.Shared.MushroomTypes)
 local Tools = require(ReplicatedStorage.Shared.Tools)
 local Baskets = require(ReplicatedStorage.Shared.Baskets)
 local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
+local PsychoMap = require(script.Parent:WaitForChild("PsychoMap"))
 
--- Насколько близко к столу надо стоять, чтобы подтвердить разбор (studs)
+-- Насколько близко к большой корзине надо стоять, чтобы подтвердить разбор (studs)
 local STATION_RANGE = 18
 
--- Проверяет, стоит ли игрок у стола для разбора. Инструменты работают
+-- Проверяет, стоит ли игрок у большой корзины. Лупы работают
 -- где угодно, а вот подтверждение — только здесь: именно ходьба
 -- туда-обратно делает большую корзину ценной.
 local function isNearStation(player: Player): boolean
@@ -41,7 +43,7 @@ local function isNearStation(player: Player): boolean
 		return false
 	end
 
-	for _, station in CollectionService:GetTagged("SortingStation") do
+	for _, station in CollectionService:GetTagged(GameConfig.stationTag) do
 		if not station:IsA("Model") or not station.Parent then
 			continue
 		end
@@ -131,6 +133,17 @@ local function pushUpdate(player: Player)
 end
 
 getBasketState.OnServerInvoke = function(player: Player)
+	local data = PlayerData.Get(player)
+	if data and #data.slots > 0 then
+		-- Игрок впервые открыл непустую корзину
+		PlayerData.TryHint(
+			player,
+			"sort_ui",
+			"Отметь ✓ те грибы, что считаешь съедобными. Остальные — ✗.",
+			1
+		)
+	end
+
 	return buildClientState(player)
 end
 
@@ -200,7 +213,7 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 	end
 
 	-- Авторитетная проверка: клиент тоже блокирует кнопку вдали от
-	-- стола, но полагаться на это нельзя.
+	-- корзины, но полагаться на это нельзя.
 	if not isNearStation(player) then
 		return
 	end
@@ -208,6 +221,7 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 	local correct = 0
 	local wrong = 0
 	local spoiled = 0 -- съедобные виды, испорченные плесенью/червями
+	local rainbowFound = false -- разобрали радужный гриб
 	local foundNames = {}
 	local newlyDiscovered = {}
 	local remaining = {}
@@ -221,6 +235,10 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 		end
 
 		local typeData = MushroomTypes[slot.typeId]
+
+		if slot.typeId == "RAINBOW_CAP" and slot.defect == nil then
+			rainbowFound = true
+		end
 
 		if not table.find(foundNames, typeData.name) then
 			table.insert(foundNames, typeData.name)
@@ -249,14 +267,30 @@ confirmBasket.OnServerEvent:Connect(function(player: Player)
 
 	data.mushroomsSorted += correct + wrong
 
+	-- В психолесу очки удваиваются
+	local multiplier = PsychoMap.GetScoreMultiplier(player)
+
 	local scoreBefore = data.score
-	PlayerData.AddScore(player, correct - wrong)
+	PlayerData.AddScore(player, (correct - wrong) * multiplier)
 	local scoreAfter = data.score
 
 	data.slots = remaining
 	PlayerData.RefreshLeaderstats(player)
 
+	-- После первого удачного разбора рассказываем про магазин
+	PlayerData.TryHint(player, "shop", "У большой корзины есть магазин: там продаётся лупа.", 3)
+
+	-- Психолес: считаем заработанное за визит, а разобранный радужный
+	-- гриб открывает вход. Порядок важен: сначала засчитать очки
+	-- текущего визита, потом уже начинать новый.
+	PsychoMap.AddEarned(player, scoreAfter - scoreBefore)
+	if rainbowFound then
+		PsychoMap.Enter(player)
+	end
+
 	confirmResult:FireClient(player, {
+		-- ×2 в психолесу: клиент покажет это в итогах
+		multiplier = multiplier,
 		correct = correct,
 		wrong = wrong,
 		spoiled = spoiled,
@@ -295,10 +329,10 @@ buyItem.OnServerEvent:Connect(function(player: Player, kind: string, itemId: str
 		return
 	end
 
-	-- Покупка только у стола: сервер проверяет сам, на клиентскую
+	-- Покупка только у большой корзины: сервер проверяет сам, на клиентскую
 	-- блокировку кнопки полагаться нельзя.
 	if not isNearStation(player) then
-		purchaseResult:FireClient(player, { ok = false, reason = "Нужно быть у стола для разбора" })
+		purchaseResult:FireClient(player, { ok = false, reason = "Подойди к большой корзине" })
 		return
 	end
 
@@ -322,6 +356,12 @@ buyItem.OnServerEvent:Connect(function(player: Player, kind: string, itemId: str
 
 		PlayerData.AddScore(player, -toolData.price)
 		table.insert(data.ownedTools, itemId)
+		PlayerData.TryHint(
+			player,
+			"inspect",
+			"Открой гриб в корзине и нажми кнопку лупы, чтобы рассмотреть его.",
+			2
+		)
 		purchaseResult:FireClient(player, { ok = true, name = toolData.name })
 		pushUpdate(player)
 	elseif kind == "basket" then

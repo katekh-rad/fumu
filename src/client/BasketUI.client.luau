@@ -25,6 +25,7 @@ local markMushroom = ReplicatedStorage:WaitForChild("MarkMushroom") :: RemoteEve
 local buyItem = ReplicatedStorage:WaitForChild("BuyItem") :: RemoteEvent
 local purchaseResult = ReplicatedStorage:WaitForChild("PurchaseResult") :: RemoteEvent
 
+local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local Tools = require(ReplicatedStorage.Shared.Tools)
 local Baskets = require(ReplicatedStorage.Shared.Baskets)
 local basketUpdated = ReplicatedStorage:WaitForChild("BasketUpdated") :: RemoteEvent
@@ -60,7 +61,7 @@ local LENS_RIM = {
 	Color3.fromRGB(240, 195, 60), -- x20: золото
 }
 
--- Насколько близко к столу надо стоять. Держим в одном значении с
+-- Насколько близко к большой корзине надо стоять. Держим в одном значении с
 -- сервером (BasketService.STATION_RANGE) — клиент только подсказывает,
 -- решает всё равно сервер.
 local STATION_RANGE = 18
@@ -983,7 +984,7 @@ local function makeRow(slot, index: number): TextButton
 	return row
 end
 
--- Считаем близость к столу прямо на клиенте: сервер знает её тоже, но
+-- Считаем близость к большой корзине прямо на клиенте: сервер знает её тоже, но
 -- пересылать обновление на каждый шаг игрока было бы расточительно.
 local function isNearStation(): boolean
 	local character = player.Character
@@ -991,7 +992,7 @@ local function isNearStation(): boolean
 	if not root then
 		return false
 	end
-	for _, station in CollectionService:GetTagged("SortingStation") do
+	for _, station in CollectionService:GetTagged(GameConfig.stationTag) do
 		if station:IsA("Model") and station.Parent then
 			if (station:GetPivot().Position - root.Position).Magnitude <= STATION_RANGE then
 				return true
@@ -1029,7 +1030,7 @@ local function refreshConfirmButton()
 		confirmButton.TextColor3 = COLORS.background
 		confirmButton.AutoButtonColor = true
 	else
-		confirmButton.Text = "Дойди до стола для разбора"
+		confirmButton.Text = "Дойди до большой корзины"
 		confirmButton.BackgroundColor3 = COLORS.accentDim
 		confirmButton.TextColor3 = COLORS.textDim
 		confirmButton.AutoButtonColor = false
@@ -1290,7 +1291,7 @@ local function refreshTabs()
 end
 
 local function setTab(tab: string)
-	-- Торговать можно только у стола: в лесу вкладка заблокирована.
+	-- Торговать можно только у большой корзины: в лесу вкладка заблокирована.
 	if tab == "shop" and not isNearStation() then
 		return
 	end
@@ -1314,14 +1315,14 @@ confirmButton.Activated:Connect(function()
 	end
 end)
 
--- Пока окно открыто, следим за тем, отошёл ли игрок от стола.
+-- Пока окно открыто, следим за тем, отошёл ли игрок от корзины.
 -- Раз в полсекунды достаточно — это не нуждается в каждом кадре.
 task.spawn(function()
 	while true do
 		task.wait(0.5)
 		if isOpen then
 			refreshConfirmButton()
-			-- если игрок ушёл от стола, вкладку магазина надо закрыть
+			-- если игрок ушёл от корзины, вкладку магазина надо закрыть
 			if activeTab == "shop" and not isNearStation() then
 				activeTab = "basket"
 				render(latestState)
@@ -1338,6 +1339,19 @@ basketUpdated.OnClientEvent:Connect(function(state)
 		latestState = state
 	end
 end)
+
+-- Переход между картами: закрываем корзину и магазин, иначе игрок
+-- попадает в психолес с открытым меню поверх экрана.
+local psychoTransition = ReplicatedStorage:WaitForChild("PsychoTransition", 15)
+if psychoTransition and psychoTransition:IsA("RemoteEvent") then
+	psychoTransition.OnClientEvent:Connect(function()
+		-- Закрываем окно и убираем экран итогов: на новой карте корзина
+		-- должна открываться сразу списком, а не прошлым разбором.
+		activeTab = "basket"
+		resultOverlay.Visible = false
+		setOpen(false)
+	end)
+end
 
 confirmResult.OnClientEvent:Connect(function(result)
 	closeDetail()
@@ -1372,7 +1386,9 @@ confirmResult.OnClientEvent:Connect(function(result)
 	end
 	resultBreakdown.Text = table.concat(lines, "\n")
 
-	resultTotal.Text = string.format("Всего очков: %d", result.newScore)
+	resultTotal.Text = if (result.multiplier or 1) > 1
+		then string.format("Всего очков: %d   •   психолес ×%d", result.newScore, result.multiplier)
+		else string.format("Всего очков: %d", result.newScore)
 
 	-- Названия найденных грибов показываем всегда, даже без лупы: так
 	-- игрок знает, что было в корзине, но не знает, где какой.
