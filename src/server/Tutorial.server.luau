@@ -21,7 +21,11 @@ local PlayerData = require(script.Parent:WaitForChild("PlayerData"))
 local WELCOME_DELAY = 3
 
 local function onCharacterAdded(player: Player)
-	PlayerData.TryHint(player, "welcome", "Ищи грибы в лесу и собирай их на E.", WELCOME_DELAY)
+	-- Подсказка называет направление, а не только действие. Игрок стоит
+	-- на пустой поляне, и «ищи грибы» без «куда идти» оставляет его в
+	-- растерянности. Лицом он развёрнут к тропе новичка (площадку
+	-- разворачивает SortingBasket), так что «впереди» — правда.
+	PlayerData.TryHint(player, "welcome", "Грибы растут впереди, в лесу. Иди туда и собирай их на E.", WELCOME_DELAY)
 end
 
 local function onPlayerAdded(player: Player)

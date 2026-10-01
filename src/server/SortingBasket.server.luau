@@ -295,10 +295,24 @@ end
 -- он возникает неизвестно где и не понимает, куда нести грибы. Если на
 -- карте уже есть своя SpawnLocation, ничего не трогаем.
 local function ensureSpawnLocation(basketPosition: Vector3)
+	-- Раньше здесь был ранний выход: нашли чужую SpawnLocation — ничего
+	-- не трогаем. Это и ломало всё начало игры. В Workspace с самого
+	-- начала лежит площадка SpawnLocation из шаблона, поэтому наш
+	-- BasketSpawn не создавался никогда, и игрок появлялся неизвестно
+	-- где — далеко от корзины и от тропы новичка.
+	--
+	-- Теперь BasketSpawn главнее: чужие площадки мы не удаляем, а
+	-- выключаем. Свойство Enabled снимается одним щелчком в Studio, так
+	-- что решение обратимо, и чужая площадка остаётся на карте.
+	local disabled = {}
 	for _, instance in workspace:GetDescendants() do
-		if instance:IsA("SpawnLocation") and instance.Name ~= "BasketSpawn" then
-			return -- своя площадка есть, она главнее
+		if instance:IsA("SpawnLocation") and instance.Name ~= "BasketSpawn" and instance.Enabled then
+			instance.Enabled = false
+			table.insert(disabled, instance:GetFullName())
 		end
+	end
+	if #disabled > 0 then
+		print(string.format("SortingBasket: выключены чужие площадки появления (%s)", table.concat(disabled, ", ")))
 	end
 
 	local existing = workspace:FindFirstChild("BasketSpawn")
@@ -315,10 +329,21 @@ local function ensureSpawnLocation(basketPosition: Vector3)
 	local result = workspace:Raycast(Vector3.new(target.X, 500, target.Z), Vector3.new(0, -2000, 0), params)
 	local groundY = if result then result.Position.Y else basketPosition.Y
 
+	local spawnPosition = Vector3.new(target.X, groundY + CONFIG.spawnSize.Y / 2, target.Z)
+
 	local spawn = Instance.new("SpawnLocation")
 	spawn.Name = "BasketSpawn"
 	spawn.Size = CONFIG.spawnSize
-	spawn.Position = Vector3.new(target.X, groundY + CONFIG.spawnSize.Y / 2, target.Z)
+	-- Площадка развёрнута от корзины к лесу: персонаж появляется лицом
+	-- туда, где начинается тропа новичка (Zones.trail), а не упирается
+	-- взглядом в бок корзины. Игрок появляется смотрящим по LookVector
+	-- площадки, поэтому задаём CFrame, а не одну Position.
+	local away = Vector3.new(spawnPosition.X - basketPosition.X, 0, spawnPosition.Z - basketPosition.Z)
+	if away.Magnitude > 0.01 then
+		spawn.CFrame = CFrame.lookAt(spawnPosition, spawnPosition + away.Unit)
+	else
+		spawn.CFrame = CFrame.new(spawnPosition)
+	end
 	spawn.Anchored = true
 	spawn.CanCollide = true
 	spawn.Color = CONFIG.spawnColor

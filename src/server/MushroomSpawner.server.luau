@@ -46,7 +46,24 @@ end
 
 -- Центр зон (большая корзина) считаем один раз при старте: во время
 -- игры она не переезжает.
+--
+-- Но корзину строит другой серверный скрипт (SortingBasket), а порядок
+-- запуска серверных скриптов Roblox не гарантирует. Если мы оказались
+-- первыми, GetCenter вернёт ноль — и поляна, и тропа посчитаются вокруг
+-- начала координат, то есть неизвестно где. Поэтому ждём корзину.
 local zoneCenter = Zones.GetCenter()
+if zoneCenter == Vector3.zero then
+	for _ = 1, 100 do
+		task.wait(0.1)
+		zoneCenter = Zones.GetCenter()
+		if zoneCenter ~= Vector3.zero then
+			break
+		end
+	end
+	if zoneCenter == Vector3.zero then
+		warn("MushroomSpawner: корзина не нашлась за 10 секунд, зоны считаются от начала координат")
+	end
+end
 
 -- Веса видов внутри одной зоны: rarity вида, умноженная на множитель
 -- зоны. Считаем по одному разу на зону, а не на каждый гриб.
@@ -239,14 +256,30 @@ local function distanceFromStation(position: Vector3): number
 	return (Vector3.new(position.X, 0, position.Z) - Vector3.new(zoneCenter.X, 0, zoneCenter.Z)).Magnitude
 end
 
--- Маркеры на поляне у корзины игнорируем: там грибы не растут вообще,
--- иначе корзину можно было бы набрать, не отходя от места разбора.
-local function isOnClearing(position: Vector3): boolean
-	return distanceFromStation(position) < Zones.clearRadius
+-- Точки тропы новичка спавнер ставит сам (см. createTrailMarkers), и
+-- узнаёт их по имени.
+local TRAIL_PREFIX = "TrailPoint_"
+
+local function isTrailMarker(marker: Instance): boolean
+	return string.sub(marker.Name, 1, #TRAIL_PREFIX) == TRAIL_PREFIX
+end
+
+-- Маркеры на поляне у корзины игнорируем: там грибы не растут, иначе
+-- корзину можно было бы набрать, не отходя от места разбора.
+--
+-- Точки тропы — исключение: их мы поставили осознанно, чтобы игрок с
+-- первого кадра видел, куда идти. Раньше здесь была геометрия с углом
+-- и радиусом, но она отсеивала и сами точки тропы, если те попадали не
+-- туда, куда ожидалось. Проверка по имени надёжнее.
+local function isOnClearing(marker: BasePart): boolean
+	if isTrailMarker(marker) then
+		return false
+	end
+	return distanceFromStation(marker.Position) < Zones.clearRadius
 end
 
 local function spawnAt(marker: BasePart)
-	if isOnClearing(marker.Position) then
+	if isOnClearing(marker) then
 		return
 	end
 
@@ -345,6 +378,87 @@ _G.GetMushroomTypeId = function(model: Model): string?
 	return activeMushrooms[model]
 end
 
+-- Тропа новичка: дорожка грибов от площадки появления в лес.
+--
+-- Точки спавнер создаёт сам, а не ищет среди маркеров у деревьев:
+-- маркеры стоят только вокруг стволов, и в нужное место дерево может
+-- вообще не попасть.
+--
+-- Отсчёт идёт от самой площадки появления, а не от центра корзины по
+-- заданному направлению. Так тропа гарантированно начинается там, где
+-- реально стоит игрок, и её не надо согласовывать с тем, куда
+-- SortingBasket поставил площадку.
+--
+-- Точки живут только в памяти сервера: в файл места не попадают и при
+-- каждом запуске создаются заново.
+local function createTrailMarkers(): number
+	local trail = Zones.trail
+	if not trail or (trail.count or 0) <= 0 then
+		return 0
+	end
+
+	-- Площадку ставит SortingBasket, и он может запуститься позже нас
+	local pad = workspace:WaitForChild("BasketSpawn", 10)
+	if not pad or not pad:IsA("BasePart") then
+		warn("MushroomSpawner: BasketSpawn не найден, тропа новичка не построена")
+		return 0
+	end
+
+	-- От корзины наружу: туда же развёрнута площадка, туда и смотрит игрок
+	local outward = Vector3.new(pad.Position.X - zoneCenter.X, 0, pad.Position.Z - zoneCenter.Z)
+	if outward.Magnitude < 0.01 then
+		warn("MushroomSpawner: площадка появления совпала с корзиной, тропа новичка не построена")
+		return 0
+	end
+	outward = outward.Unit
+	-- Поперечное направление для петляния
+	local sideways = Vector3.new(-outward.Z, 0, outward.X)
+
+	-- Перезапуск сервера не должен плодить тропу
+	for _, child in spawnsFolder:GetChildren() do
+		if isTrailMarker(child) then
+			child:Destroy()
+		end
+	end
+
+	-- Целимся в рельеф, как это делает генератор маркеров: деревья и
+	-- шляпки грибов луч должен игнорировать, иначе гриб повиснет в
+	-- воздухе на кроне.
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { workspace.Terrain }
+
+	local created = 0
+
+	for index = 1, trail.count do
+		local along = trail.startOffset + (index - 1) * trail.spacing
+		-- Точки уходят то влево, то вправо: тропа петляет
+		local side = if index % 2 == 0 then 1 else -1
+		local wobble = trail.wobbleStuds * side * (0.3 + math.random() * 0.7)
+
+		local point = pad.Position + outward * along + sideways * wobble
+		local hit = workspace:Raycast(Vector3.new(point.X, point.Y + 500, point.Z), Vector3.new(0, -2000, 0), params)
+		-- Без рельефа под точкой ставим гриб на уровень площадки: лучше
+		-- чуть выше травы, чем отсутствие тропы.
+		local position = if hit then hit.Position else Vector3.new(point.X, pad.Position.Y, point.Z)
+
+		local marker = Instance.new("Part")
+		marker.Name = TRAIL_PREFIX .. index
+		marker.Size = Vector3.new(1, 1, 1)
+		marker.Position = position
+		marker.Anchored = true
+		marker.CanCollide = false
+		marker.Transparency = 1
+		marker:SetAttribute("GrowthType", "Ground")
+		marker.Parent = spawnsFolder
+		created += 1
+	end
+
+	return created
+end
+
+local trailCount = createTrailMarkers()
+
 -- Начальный спавн по всем маркерам
 for _, marker in spawnsFolder:GetChildren() do
 	if marker:IsA("BasePart") then
@@ -358,7 +472,7 @@ local zoneCounts = {}
 local skipped = 0
 for _, marker in spawnsFolder:GetChildren() do
 	if marker:IsA("BasePart") then
-		if isOnClearing(marker.Position) then
+		if isOnClearing(marker) then
 			skipped += 1
 		else
 			local zone = Zones.GetByPosition(marker.Position, zoneCenter)
@@ -367,7 +481,12 @@ for _, marker in spawnsFolder:GetChildren() do
 	end
 end
 
-local zoneReport = { string.format("поляна у корзины пропущена: %d", skipped) }
+local zoneReport = {
+	string.format("поляна у корзины пропущена: %d", skipped),
+	-- По этой цифре видно, появилась тропа или нет: если 0, значит
+	-- Zones.trail выключен или count = 0.
+	string.format("тропа новичка: %d", trailCount),
+}
 for _, zoneId in Zones.Order do
 	local zone = Zones.Data[zoneId]
 	table.insert(zoneReport, string.format("%s: %d", zone.name, zoneCounts[zone.name] or 0))
